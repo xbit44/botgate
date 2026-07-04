@@ -1,0 +1,10 @@
+BotGate v2.0 - TCP bot gate for
+any telnet BBS. Callers must press
+ESC/* twice before reaching your
+real BBS. Custom ANSI prompts w/
+live countdown. Synchronet-style
+.can blocklists, IP2Location geo-
+blocking, reverse-DNS matching,
+auto rate-limit temp-bans. Pure
+Python3, zero deps. Linux/Win/Mac.
+Built for Spitfire, works anywhere.

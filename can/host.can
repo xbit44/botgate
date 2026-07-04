@@ -1,0 +1,6 @@
+; Enter filtered (disallowed) HOSTNAME patterns in this file
+; Wildcard characters (*, ^, ~) are allowed and ! negates the match
+; One hostname pattern per line, e.g.: *.some-bad-host.net
+; Requires dns_lookup_enabled = yes in botgate_proxy.cfg -- each
+; connecting IP is reverse-DNS'd and the resulting hostname (if any)
+; is checked against the patterns below. Matches here are logged.
