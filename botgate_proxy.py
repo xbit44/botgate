@@ -646,6 +646,7 @@ def load_config():
 DEFAULT_PROMPT_TEXT = b"\r\nPress ESC or * twice within ## seconds to continue...\r\n"
 
 PLACEHOLDER_RE = re.compile(rb"#+")
+ANSI_ESCAPE_RE = re.compile(rb"\x1b\[[0-9;]*[A-Za-z]")
 
 log = logging.getLogger("botgate_proxy")
 
@@ -711,7 +712,18 @@ def build_prompt(cfg):
         m = PLACEHOLDER_RE.search(line)
         if m:
             width = m.end() - m.start()
-            col = m.start() + 1
+            # The column must reflect where '##' actually lands on
+            # screen once a real terminal renders the line -- ANSI/SGR
+            # escape sequences (color codes, etc.) appearing earlier on
+            # the same line take up bytes in the file but consume zero
+            # screen columns, so they must be stripped out before
+            # counting position. Using the raw byte offset instead
+            # (an earlier bug) sends the live update to the wrong
+            # column whenever a prompt file has color codes before the
+            # placeholder -- harmless on plain/uncolored prompt files,
+            # which is why this went unnoticed until a colorized one
+            # was tested.
+            col = len(ANSI_ESCAPE_RE.sub(b"", line[:m.start()])) + 1
             row = row_idx + 1
             start_text = f"{int(cfg['timeout_seconds']):>{width}}".encode("ascii")[-width:]
             lines[row_idx] = line[:m.start()] + start_text + line[m.end():]
