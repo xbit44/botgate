@@ -903,7 +903,15 @@ def handle_client(client_sock, addr, cfg, blocklists, rate_limiter):
         return
     # 'exempt' and 'allow' both proceed normally from here
 
-    if not try_acquire_ip_slot(ip, cfg["ip_cap"]):
+    # Exempt IPs (ipfilter_exempt.cfg) bypass ip_cap too -- the file's
+    # own header comment already promises exemption from "filtering/
+    # banning/throttling", and a connection cap is a form of
+    # throttling. Useful for a sysop's own IP when testing multiple
+    # simultaneous node connections. No slot is acquired or released
+    # for an exempt IP, so it never affects the count for anyone else.
+    exempt = (action == "exempt")
+
+    if not exempt and not try_acquire_ip_slot(ip, cfg["ip_cap"]):
         log.warning(f"{ip} rejected -- already at IP cap ({cfg['ip_cap']}), instant drop.")
         try:
             client_sock.close()

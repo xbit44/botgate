@@ -1,7 +1,7 @@
 # BotGate
 
 **A TCP-Level Bot Gate for BBS Systems**
-Version 2.0 — User Guide & Configuration Reference
+Version 2.1 — User Guide & Configuration Reference
 
 BotGate is a standalone Python 3 program that stands in front of a BBS's real telnet port and requires each caller to prove they can follow a simple interactive instruction — pressing ESC or `*` twice — before the actual BBS software ever sees the connection. Callers who don't respond (or who are obviously automated, not human) are disconnected without ever reaching the BBS.
 
@@ -65,25 +65,21 @@ Verify it worked with `python3 --version` (or `python --version` on some Windows
 
 ## 4. Installation & Quick Start
 
-1. Copy `botgate_proxy.py` to a machine that can reach your BBS's real listening port (this can be the same machine the BBS runs on, or a different one on the same network).
+1. Copy the whole release — `botgate_proxy.py`, `botgate_proxy.cfg`, the `can/` and `geo/` folders, and the rest of the supporting files — to a machine that can reach your BBS's real listening port (this can be the same machine the BBS runs on, or a different one on the same network). The release already includes a ready-to-edit `botgate_proxy.cfg`, so there's no separate "generate a config" step needed.
 
    **Single-PC sysops:** this is the common case — BotGate and your BBS can both run on the same computer. Just point `backend_host` at `127.0.0.1` and have your BBS listen on a different local port than BotGate does.
 
-2. Run it once:
-   ```
-   python3 botgate_proxy.py
-   ```
-   It will write a default `botgate_proxy.cfg` next to itself and exit.
+   *(If you only have `botgate_proxy.py` by itself with no config file present, running it once will write a default `botgate_proxy.cfg` next to itself and exit — same content as the one included in the full release.)*
 
-3. Edit `botgate_proxy.cfg`:
+2. Edit `botgate_proxy.cfg`:
    - Set `backend_host` and `backend_port` to your real BBS's address — where it's actually listening.
    - Set `listen_port` to the port callers will connect to. Using the same port your BBS used before means existing callers' phonebook entries don't need to change.
 
-4. **(Strongly recommended)** Reconfigure your BBS/telnet server to listen on a different, internal-only port — not the public one — so the gate cannot be bypassed by connecting directly to the BBS's real port. Make sure that internal port is not separately exposed to the internet.
+3. **(Strongly recommended)** Reconfigure your BBS/telnet server to listen on a different, internal-only port — not the public one — so the gate cannot be bypassed by connecting directly to the BBS's real port. Make sure that internal port is not separately exposed to the internet.
 
-5. Update your router's port-forward to point at the machine running BotGate, using the same public-facing port your BBS used before.
+4. Update your router's port-forward to point at the machine running BotGate, using the same public-facing port your BBS used before.
 
-6. Run BotGate again:
+5. Run BotGate:
    ```
    python3 botgate_proxy.py
    ```
@@ -92,7 +88,7 @@ Verify it worked with `python3 --version` (or `python --version` on some Windows
    Listening on 0.0.0.0:23230, relaying to 192.168.1.199:2323 on pass.
    ```
 
-7. Test a connection from **outside your own network** before considering the migration complete — a connection from inside your LAN can sometimes behave differently than one from the real internet (see Section 15, Troubleshooting).
+6. Test a connection from **outside your own network** before considering the migration complete — a connection from inside your LAN can sometimes behave differently than one from the real internet (see Section 15, Troubleshooting).
 
 ## 5. The Gate
 
@@ -138,7 +134,7 @@ BotGate supports Synchronet-style `.can` blocklist files, located in the directo
 
 | File | Purpose |
 |---|---|
-| `ipfilter_exempt.cfg` | IPs that are always allowed, bypassing every other check in this list (including rate limiting). |
+| `ipfilter_exempt.cfg` | IPs that are always allowed, bypassing every other check in this list (including rate limiting and the `ip_cap` connection limit). |
 | `ip.can` | Blocked IPs/CIDR/wildcards. Matches are logged. |
 | `ip-silent.can` | Blocked IPs/CIDR/wildcards. Matches are **not** logged — useful for known noise sources you don't want cluttering your logs. |
 | `host.can` | Blocked hostname patterns, checked against each connecting IP's reverse-DNS result (see Section 9). |
@@ -179,6 +175,8 @@ If the lookup doesn't complete within the timeout, or the IP has no PTR record a
 ## 10. Per-IP Connection Cap
 
 `ip_cap` limits how many simultaneous connections a single source IP may have open at once. A connection attempt from an IP already at the cap is dropped instantly — no gate prompt is sent, and no connection to the backend is attempted. Set to `0` to disable.
+
+IPs listed in `ipfilter_exempt.cfg` bypass this entirely — useful for your own workstation/LAN when you need to test multiple node connections at once (e.g. logging into all four nodes of a multi-node BBS simultaneously) without hitting a cap meant for the general public.
 
 ## 11. Rate Limiting & Auto Temp-Bans
 
@@ -267,6 +265,11 @@ Thanks also to [Digital Man](https://www.synchro.net/) of the Synchronet project
 - Reverse-DNS hostname matching with fail-open timeout handling.
 - Automatic rate-limiting with a self-managed, human-readable `temp_ip.can` ban file.
 - Anti-bypass hardening: strict "pure chunk" ESC/`*` matching, and fail-fast rejection of large scripted payloads.
+
+### v2.1
+
+- Fixed: countdown live-updates were sent to the wrong screen column whenever a prompt file had ANSI color codes before the `##` placeholder on the same line (the position was computed from raw byte offset instead of true visual column, which happened to work by coincidence on plain/uncolored prompt files).
+- Fixed: `ipfilter_exempt.cfg` entries now also bypass `ip_cap`, matching what the file's own header comment already promised ("exempt from filtering/banning/throttling"). Useful for testing multiple simultaneous node connections from your own IP.
 
 ## 18. Passing the Real Caller IP to the Backend (Advanced)
 
