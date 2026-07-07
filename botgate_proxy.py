@@ -167,6 +167,17 @@ banner_file =
 ; connections to its BBS ports -- every connection must come through
 ; BotGate (or another PROXY-protocol-aware front end) from that point on.
 send_proxy_protocol = no
+
+; Global cap on total simultaneous connections, across all source IPs
+; combined. ip_cap only limits how many connections a single IP can
+; have open at once -- nothing stops a distributed source (many
+; different IPs at the same time) from opening unbounded connections
+; and spawning unbounded threads. This is resource protection for the
+; server itself, so it applies to everyone, including exempt IPs.
+; Size this comfortably above your real expected concurrent callers
+; (e.g. number of BBS nodes) -- it's a safety ceiling, not a normal
+; operating limit.
+max_connections = 50
 """
 
 TRIGGER_BYTES = (0x1B, 0x2A)  # ESC, '*'
@@ -455,6 +466,32 @@ class RateLimiter:
         self.recent = {}   # ip -> [monotonic timestamps within window]
         self.banned = {}   # ip -> expiration datetime (aware, UTC)
         self._load()
+        self._start_cleanup_thread()
+
+    def _start_cleanup_thread(self):
+        """A one-time scanner hit leaves a tiny leftover entry in
+        self.recent that nothing would otherwise ever clean up, since
+        entries are normally only pruned when that same IP connects
+        again. On a long-running public service, this accumulates
+        slowly but indefinitely. This background thread sweeps out
+        any IP whose most recent attempt has already aged out of the
+        window, so memory doesn't grow forever from one-off traffic."""
+        interval = max(60, self.window_seconds * 2)
+
+        def cleanup_loop():
+            while True:
+                time.sleep(interval)
+                now = time.monotonic()
+                with self.lock:
+                    stale = [
+                        ip for ip, attempts in self.recent.items()
+                        if not attempts or (now - attempts[-1]) > self.window_seconds
+                    ]
+                    for ip in stale:
+                        del self.recent[ip]
+
+        t = threading.Thread(target=cleanup_loop, daemon=True)
+        t.start()
 
     def _parse_line(self, line):
         parts = line.split("\t")
@@ -585,7 +622,11 @@ def check_access(ip, blocklists, cfg, rate_limiter):
     if geo_hit:
         return "block_logged", f"geo/{geo_hit}"
 
-    if cfg["dns_lookup_enabled"]:
+    if cfg["dns_lookup_enabled"] and blocklists.host_can.patterns:
+        # Only bother with the lookup at all if host.can actually has
+        # something to match against -- otherwise every connection
+        # pays the DNS round-trip cost (and spins up a lookup thread)
+        # for a check that can never possibly block anything.
         hostname = reverse_dns_lookup(ip, timeout=2.0)
         log.debug(f"{ip} reverse DNS: {hostname!r}")
         if hostname and blocklists.host_can.matches(hostname):
@@ -621,15 +662,23 @@ def load_config():
     def resolve_dir(value):
         return value if os.path.isabs(value) else os.path.join(script_dir, value)
 
+    def resolve_optional_path(value):
+        # Same idea as resolve_dir, but for settings that can legitimately
+        # be blank (meaning "disabled"/"use built-in default") -- an empty
+        # string must stay empty, not get resolved into script_dir itself.
+        if not value:
+            return value
+        return value if os.path.isabs(value) else os.path.join(script_dir, value)
+
     return {
         "listen_port": p.getint("listen_port", 2323),
         "backend_host": p.get("backend_host", "127.0.0.1"),
         "backend_port": p.getint("backend_port", 23),
         "timeout_seconds": p.getfloat("timeout_seconds", 20),
         "required_hits": p.getint("required_hits", 2),
-        "prompt_file": p.get("prompt_file", "").strip(),
+        "prompt_file": resolve_optional_path(p.get("prompt_file", "").strip()),
         "live_countdown": p.getboolean("live_countdown", True),
-        "log_file": p.get("log_file", "botgate_proxy.log").strip(),
+        "log_file": resolve_optional_path(p.get("log_file", "botgate_proxy.log").strip()),
         "log_level": p.get("log_level", "INFO").strip().upper(),
         "ip_cap": p.getint("ip_cap", 2),
         "can_dir": resolve_dir(p.get("can_dir", "can").strip()),
@@ -638,8 +687,9 @@ def load_config():
         "rate_limit_hits": p.getint("rate_limit_hits", 20),
         "rate_limit_window_seconds": p.getfloat("rate_limit_window_seconds", 10),
         "rate_limit_ban_minutes": p.getfloat("rate_limit_ban_minutes", 90),
-        "banner_file": p.get("banner_file", "").strip(),
+        "banner_file": resolve_optional_path(p.get("banner_file", "").strip()),
         "send_proxy_protocol": p.getboolean("send_proxy_protocol", False),
+        "max_connections": p.getint("max_connections", 50),
     }
 
 
@@ -749,6 +799,21 @@ def run_gate(client_sock, cfg, addr):
         # starting timeout value in build_prompt() above -- this just
         # skips the periodic re-send that follows, leaving it static.
         countdown = None
+
+    # Clear the screen and home the cursor before drawing anything.
+    # The countdown (if enabled) uses ABSOLUTE cursor-position escape
+    # codes, computed assuming row 1 = the first row of our own
+    # prompt. Some web-based telnet clients/gateways (e.g. fTelnet)
+    # print their own "Connecting to..." status line into the same
+    # terminal buffer before handing off -- if we don't reset to a
+    # known blank state first, our prompt block (and thus its "row 1")
+    # ends up physically shifted down by however many rows that status
+    # text took, while the countdown's absolute coordinates don't
+    # shift with it, landing the live digits one or more rows too
+    # high. Harmless no-op on clients that already start at a blank
+    # screen (SyncTERM, etc).
+    initial_bytes = b"\x1b[2J\x1b[H" + initial_bytes
+
     try:
         client_sock.sendall(initial_bytes)
     except OSError:
@@ -884,45 +949,56 @@ def release_ip_slot(ip):
             active_connections[ip] = current - 1
 
 
-def handle_client(client_sock, addr, cfg, blocklists, rate_limiter):
+def handle_client(client_sock, addr, cfg, blocklists, rate_limiter, global_semaphore):
     ip = addr[0]
 
-    action, reason = check_access(ip, blocklists, cfg, rate_limiter)
-    if action == "block_logged":
-        log.warning(f"{ip} blocked by {reason}.")
-        try:
-            client_sock.close()
-        except OSError:
-            pass
-        return
-    elif action == "block_silent":
-        try:
-            client_sock.close()
-        except OSError:
-            pass
-        return
-    # 'exempt' and 'allow' both proceed normally from here
-
-    # Exempt IPs (ipfilter_exempt.cfg) bypass ip_cap too -- the file's
-    # own header comment already promises exemption from "filtering/
-    # banning/throttling", and a connection cap is a form of
-    # throttling. Useful for a sysop's own IP when testing multiple
-    # simultaneous node connections. No slot is acquired or released
-    # for an exempt IP, so it never affects the count for anyone else.
-    exempt = (action == "exempt")
-
-    if not exempt and not try_acquire_ip_slot(ip, cfg["ip_cap"]):
-        log.warning(f"{ip} rejected -- already at IP cap ({cfg['ip_cap']}), instant drop.")
-        try:
-            client_sock.close()
-        except OSError:
-            pass
-        return
+    # Note: the global connection slot for this thread was already
+    # acquired in the accept loop (main()), before this thread was
+    # even created -- that's what actually bounds thread creation
+    # itself, not just what happens after a thread starts. See the
+    # accept loop for the acquire; the release happens below in the
+    # outer finally, since release() is safe to call from any thread.
 
     try:
-        _handle_client_inner(client_sock, addr, cfg)
+        action, reason = check_access(ip, blocklists, cfg, rate_limiter)
+        if action == "block_logged":
+            log.warning(f"{ip} blocked by {reason}.")
+            try:
+                client_sock.close()
+            except OSError:
+                pass
+            return
+        elif action == "block_silent":
+            try:
+                client_sock.close()
+            except OSError:
+                pass
+            return
+        # 'exempt' and 'allow' both proceed normally from here
+
+        # Exempt IPs (ipfilter_exempt.cfg) bypass ip_cap too -- the file's
+        # own header comment already promises exemption from "filtering/
+        # banning/throttling", and a connection cap is a form of
+        # throttling. Useful for a sysop's own IP when testing multiple
+        # simultaneous node connections. No slot is acquired or released
+        # for an exempt IP, so it never affects the count for anyone else.
+        exempt = (action == "exempt")
+
+        if not exempt and not try_acquire_ip_slot(ip, cfg["ip_cap"]):
+            log.warning(f"{ip} rejected -- already at IP cap ({cfg['ip_cap']}), instant drop.")
+            try:
+                client_sock.close()
+            except OSError:
+                pass
+            return
+
+        try:
+            _handle_client_inner(client_sock, addr, cfg)
+        finally:
+            if not exempt:
+                release_ip_slot(ip)
     finally:
-        release_ip_slot(ip)
+        global_semaphore.release()
 
 
 def _handle_client_inner(client_sock, addr, cfg):
@@ -1042,10 +1118,20 @@ def main():
     cfg = load_config()
     print_startup_banner(cfg)
     setup_logging(cfg["log_file"], cfg["log_level"])
+
+    if cfg["max_connections"] < 1:
+        log.error(f"max_connections is set to {cfg['max_connections']}, which is invalid -- "
+                  f"must be 1 or greater. (0 would reject every single caller; a negative "
+                  f"value would crash outright.) Fix max_connections in botgate_proxy.cfg "
+                  f"and restart.")
+        sys.exit(1)
+
     blocklists = BlockLists(cfg)
     rate_limiter = RateLimiter(cfg, cfg["can_dir"])
+    global_semaphore = threading.BoundedSemaphore(cfg["max_connections"])
     log.info(f"Listening on 0.0.0.0:{cfg['listen_port']}, "
-             f"relaying to {cfg['backend_host']}:{cfg['backend_port']} on pass.")
+             f"relaying to {cfg['backend_host']}:{cfg['backend_port']} on pass. "
+             f"(max_connections={cfg['max_connections']})")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1055,12 +1141,39 @@ def main():
     try:
         while True:
             client_sock, addr = listener.accept()
-            t = threading.Thread(
-                target=handle_client,
-                args=(client_sock, addr, cfg, blocklists, rate_limiter),
-                daemon=True,
-            )
-            t.start()
+
+            # Acquire the global slot HERE, before creating a thread at
+            # all -- this is what makes max_connections a true cap on
+            # thread creation itself, not just on what a thread does
+            # once it's already running. A burst of connections beyond
+            # the cap now gets rejected right in the accept loop, with
+            # no thread ever spun up for the excess.
+            if not global_semaphore.acquire(blocking=False):
+                log.warning(f"{addr[0]} rejected -- global connection limit "
+                            f"({cfg['max_connections']}) reached.")
+                try:
+                    client_sock.close()
+                except OSError:
+                    pass
+                continue
+
+            try:
+                t = threading.Thread(
+                    target=handle_client,
+                    args=(client_sock, addr, cfg, blocklists, rate_limiter, global_semaphore),
+                    daemon=True,
+                )
+                t.start()
+            except Exception:
+                # If thread creation itself somehow fails (e.g. the OS
+                # genuinely can't create any more threads), don't leak
+                # the permit we already reserved.
+                global_semaphore.release()
+                try:
+                    client_sock.close()
+                except OSError:
+                    pass
+                raise
     except KeyboardInterrupt:
         log.info("Shutting down.")
     finally:

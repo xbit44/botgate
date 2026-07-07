@@ -1,7 +1,7 @@
 # BotGate
 
 **A TCP-Level Bot Gate for BBS Systems**
-Version 2.1 — User Guide & Configuration Reference
+Version 2.2 — User Guide & Configuration Reference
 
 BotGate is a standalone Python 3 program that stands in front of a BBS's real telnet port and requires each caller to prove they can follow a simple interactive instruction — pressing ESC or `*` twice — before the actual BBS software ever sees the connection. Callers who don't respond (or who are obviously automated, not human) are disconnected without ever reaching the BBS.
 
@@ -20,6 +20,7 @@ It was originally built to protect a Spitfire BBS node running behind a NetSeria
 8. [Geo-Blocking (/geo directory)](#8-geo-blocking-geo-directory)
 9. [Reverse DNS (host.can)](#9-reverse-dns-hostcan)
 10. [Per-IP Connection Cap](#10-per-ip-connection-cap)
+    - [10a. Global Connection Cap](#10a-global-connection-cap)
 11. [Rate Limiting & Auto Temp-Bans](#11-rate-limiting--auto-temp-bans)
 12. [Logging](#12-logging)
 13. [Full Configuration Reference](#13-full-configuration-reference)
@@ -94,11 +95,14 @@ Verify it worked with `python3 --version` (or `python --version` on some Windows
 
 By default, a caller must press ESC (`0x1B`) and/or `*` (`0x2A`), in any combination, twice within 20 seconds (both configurable — see Section 13). On success, the screen clears and the caller is handed off to the real BBS. On failure, the connection is closed.
 
+**What this is, and isn't.** The ESC/`*` challenge is effective against generic scanners, HTTP/SSH probes, and bots that blindly fire off unrelated payloads without ever reading what comes back — which describes essentially all of the automated internet background noise a public BBS port attracts. It is not cryptographic authentication or identity verification: a bot specifically written to send the expected characters would pass. Treat BotGate as a scanner/automation filter that protects legacy BBS software from routine internet noise, not as a security boundary against a targeted attacker.
+
 ### Anti-bypass protections
 
 - A keypress only counts if the entire chunk of data received is purely ESC/`*` bytes. This closes off a real-world bypass found in testing: an HTTP scanner's request happened to contain two literal `*` characters inside an ordinary `Accept: */*` header, which a naive per-byte check miscounted as two genuine keypresses.
 - A large chunk of data that is *not* purely ESC/`*` (more than 8 bytes) is treated as a scripted, non-interactive payload and fails the gate immediately, rather than idling for the rest of the timeout window. Smaller stray keystrokes (a mistyped key, an arrow-key sequence) are simply ignored, giving real humans the benefit of the doubt.
 - Telnet protocol negotiation (IAC sequences) is transparently handled on both the caller-facing and backend-facing sides of the connection, so real telnet clients and the actual BBS's own negotiation both work correctly without interference from each other.
+- Before drawing the prompt, the screen is cleared and the cursor is homed (`ESC[2J` `ESC[H`). Some web-based telnet clients/gateways print their own connection-status text into the same terminal buffer before handing off to BotGate — without this reset, the whole prompt (and the live countdown's absolute cursor-positioning) would be shifted down by however many rows that status text took, landing the countdown in the wrong place. Harmless no-op on clients that already start at a blank screen.
 
 ## 6. Custom Prompts & the Live Countdown
 
@@ -108,7 +112,7 @@ Set `prompt_file` to the path of any ANSI or ASCII file to fully customize what 
 
 Include a run of `#` characters anywhere in the prompt file (for example `##`) and BotGate will substitute the starting timeout value there, then update it live, once per second, counting down — without redrawing anything else on the screen. The field width follows the number of `#` characters used: `##` gives a 2-digit field, `###` gives 3, and so on.
 
-Set `live_countdown = no` to disable the per-second updates — the starting number still displays (the `#` placeholder is still substituted), it just stays static rather than counting down. This is a compatibility option: the live version relies on repeated ANSI cursor-positioning, which real terminal software (SyncTERM, NetRunner, etc.) handles perfectly, but some web-based telnet clients (fTelnet, in testing) don't implement that correctly and show garbled text where the countdown should be. If a meaningful share of your callers connect through a web-based client, `live_countdown = no` trades the live effect for guaranteed-clean rendering everywhere.
+Set `live_countdown = no` to disable the per-second updates — the starting number still displays (the `#` placeholder is still substituted), it just stays static rather than counting down. This is a compatibility option for clients whose ANSI handling still causes trouble even with the screen-reset fix above.
 
 ### Line endings
 
@@ -129,6 +133,12 @@ Leave `banner_file` blank (the default) to disable this entirely.
 ## 7. Blocklists (.can files)
 
 BotGate supports Synchronet-style `.can` blocklist files, located in the directory set by `can_dir` (default: `can/`, next to the script). Format: one entry per line — a plain IP address, CIDR notation (e.g. `192.168.1.0/24`), a wildcard (e.g. `*.example.com`), or the same prefixed with `!` to negate/exempt that specific pattern within the file. Lines starting with `;` or `#` are comments.
+
+### Wildcard support
+
+- `*` matches any number of characters (e.g. `*.example.com` matches any subdomain).
+- `?` matches exactly one character.
+- `^` and `~` are **not** implemented as wildcards, despite appearing in some `.can` file header comments (that wording matches Synchronet's own convention, kept for familiarity). BotGate could not confirm Synchronet's exact documented behavior for those two characters, and none of the real-world `.can` data used to build and test this feature used them — so rather than guess at unverified semantics, they're treated as ordinary literal characters. A pattern containing `^` or `~` will only match text containing that literal character, not act as a wildcard.
 
 ### Files
 
@@ -172,11 +182,21 @@ Controlled by `dns_lookup_enabled` (yes/no). When enabled, BotGate performs a re
 
 If the lookup doesn't complete within the timeout, or the IP has no PTR record at all, the connection is **not** blocked — it fails open. This is deliberate: many legitimate residential and dynamic IP addresses have no reverse DNS, and a flaky or slow resolver should never be able to block real callers.
 
+The lookup itself is skipped entirely if `host.can` has no active patterns (empty, or comments only) — there's no reason to pay the DNS round-trip cost, or spin up a lookup thread, for a check that can't possibly block anything.
+
 ## 10. Per-IP Connection Cap
 
 `ip_cap` limits how many simultaneous connections a single source IP may have open at once. A connection attempt from an IP already at the cap is dropped instantly — no gate prompt is sent, and no connection to the backend is attempted. Set to `0` to disable.
 
 IPs listed in `ipfilter_exempt.cfg` bypass this entirely — useful for your own workstation/LAN when you need to test multiple node connections at once (e.g. logging into all four nodes of a multi-node BBS simultaneously) without hitting a cap meant for the general public.
+
+## 10a. Global Connection Cap
+
+`max_connections` limits the total number of simultaneous connections across *all* source IPs combined — a different kind of protection than `ip_cap`, which only bounds a single IP's own concurrency. Nothing stops a distributed source (many different IPs at once) from opening unbounded connections otherwise, each spawning its own worker thread; `max_connections` puts a hard ceiling on that.
+
+Unlike `ip_cap`, this applies to *everyone equally, including exempt IPs* — it's resource protection for the server itself, not an abuse-detection measure aimed at any particular caller, so exemption doesn't make sense the same way here. The slot is reserved before a connection thread is even created, so a burst beyond the cap is rejected immediately in the accept loop rather than still spinning up (and then quickly tearing down) a thread per excess connection.
+
+Size this comfortably above your real expected concurrent callers (e.g. your BBS's node count) — it's a safety ceiling, not a normal operating limit. Default is `50`. Must be `1` or greater; BotGate refuses to start with a clear error if it's set to `0` or a negative number, rather than either silently rejecting every caller or crashing.
 
 ## 11. Rate Limiting & Auto Temp-Bans
 
@@ -190,7 +210,9 @@ Ban entries use the same `t=`/`e=` (created/expires) timestamp convention as rea
 203.0.113.5   t=20260704T112009+0000   e=20260704T112109+0000   r=20 hits in 10.0s
 ```
 
-Expired entries are automatically dropped the next time BotGate starts, or the next time that specific IP is checked — there is no separate background cleanup timer, so an expired-but-inactive entry may remain visible in the file (harmlessly) until one of those two events occurs.
+Expired entries are automatically dropped the next time BotGate starts, or the next time that specific IP is checked — there is no separate background cleanup timer for `temp_ip.can` itself, so an expired-but-inactive ban entry may remain visible in the file (harmlessly) until one of those two events occurs.
+
+Separately, the in-memory tracking used to *detect* rate-limit violations (not the same thing as the `temp_ip.can` ban file above) is swept automatically in the background every minute or so, discarding any IP's tracking data once its most recent attempt has aged out of the window. This prevents one-off traffic (a single scanner hit that never repeats) from leaving small leftover entries in memory indefinitely on a long-running install.
 
 ## 12. Logging
 
@@ -223,6 +245,7 @@ Controlled by `log_file` (blank disables file logging; console output always hap
 | `rate_limit_ban_minutes` | `90` | How long an auto temp-ban (in `temp_ip.can`) lasts. |
 | `banner_file` | *(blank)* | Path to an ANSI/ASCII file to print on startup — see Section 6a. Blank disables it. |
 | `send_proxy_protocol` | `no` | Sends a PROXY protocol v1 header to the backend — see Section 18. Only enable if your backend specifically supports it. |
+| `max_connections` | `50` | Global cap on total simultaneous connections across all IPs combined — see Section 10a. Must be 1 or greater. |
 
 ## 14. Platform Notes
 
@@ -270,6 +293,17 @@ Thanks also to [Digital Man](https://www.synchro.net/) of the Synchronet project
 
 - Fixed: countdown live-updates were sent to the wrong screen column whenever a prompt file had ANSI color codes before the `##` placeholder on the same line (the position was computed from raw byte offset instead of true visual column, which happened to work by coincidence on plain/uncolored prompt files).
 - Fixed: `ipfilter_exempt.cfg` entries now also bypass `ip_cap`, matching what the file's own header comment already promised ("exempt from filtering/banning/throttling"). Useful for testing multiple simultaneous node connections from your own IP.
+
+### v2.2
+
+- Fixed: the live countdown could be sent to the wrong screen row entirely (not just column) when a web-based telnet client/gateway printed its own connection-status text into the terminal before handing off to BotGate, shifting the whole prompt block down without the countdown's absolute coordinates shifting with it. BotGate now clears the screen and homes the cursor before drawing the prompt, giving every client a known, consistent starting point. Diagnosed and fixed based on a detailed write-up from a member of the BBS community — thank you.
+- Improved: reverse-DNS lookups are now skipped entirely when `host.can` has no active patterns to match against, avoiding unnecessary latency and resolver load on every connection for a check that couldn't block anything anyway.
+- Improved: the in-memory tracking behind rate-limiting is now swept periodically in the background, so one-off traffic (a scanner that hits once and never returns) doesn't leave small leftover entries in memory indefinitely on a long-running install.
+- Added: `max_connections`, a global cap on total simultaneous connections across all source IPs combined (Section 10a) — protects against a distributed flood that the existing per-IP `ip_cap` can't stop on its own. The cap is enforced before a connection thread is even created, so excess connections during a burst are rejected immediately rather than still spinning up (and quickly tearing down) a thread each. Config validation added: `max_connections` of `0` or negative now fails at startup with a clear error instead of silently rejecting every caller or crashing.
+- Fixed: `prompt_file`, `banner_file`, and `log_file` now resolve relative to the script's own directory (matching how `can_dir`/`geo_dir` already worked), instead of relative to whatever directory the process happened to be launched from. Previously, running BotGate manually from a different working directory than usual could silently fail to find these files even though the exact same config worked fine under systemd.
+- Documentation: clarified that `*` and `?` are the only real wildcards in `.can` files — `^` and `~` (mentioned in some file header comments for consistency with Synchronet's own convention) are not implemented and are treated as literal characters. Also added explicit framing that the ESC/`*` gate is a bot/scanner filter, not strong authentication.
+
+Items 1–4 above were identified through an independent code review of the v2.1 source; thank you to that reviewer as well.
 
 ## 18. Passing the Real Caller IP to the Backend (Advanced)
 
