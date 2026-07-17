@@ -100,4 +100,4 @@ When preparing a release:
 - Explain compatibility and operational impact.
 - Separate confirmed behavior from inferred behavior.
 - Do not assume historical defaults remain current without reading the
-  checked-in v2.2-or-later configuration.
+  checked-in v2.3-or-later configuration.

@@ -1,7 +1,7 @@
 # BotGate
 
 **A TCP-Level Bot Gate for BBS Systems**
-Version 2.2 — User Guide & Configuration Reference
+Version 2.3 — User Guide & Configuration Reference
 
 BotGate is a standalone Python 3 program that stands in front of a BBS's real telnet port and requires each caller to prove they can follow a simple interactive instruction — pressing ESC or `*` twice — before the actual BBS software ever sees the connection. Callers who don't respond (or who are obviously automated, not human) are disconnected without ever reaching the BBS.
 
@@ -29,6 +29,7 @@ It was originally built to protect a Spitfire BBS node running behind a NetSeria
 16. [Credits](#16-credits)
 17. [Version History](#17-version-history)
 18. [Passing the Real Caller IP to the Backend (Advanced)](#18-passing-the-real-caller-ip-to-the-backend-advanced)
+19. [Multi-Listener Support: Protecting More Than One App](#19-multi-listener-support-protecting-more-than-one-app)
 
 ---
 
@@ -244,7 +245,7 @@ Controlled by `log_file` (blank disables file logging; console output always hap
 | `rate_limit_window_seconds` | `10` | Sliding window (seconds) the above is measured over. |
 | `rate_limit_ban_minutes` | `90` | How long an auto temp-ban (in `temp_ip.can`) lasts. |
 | `banner_file` | *(blank)* | Path to an ANSI/ASCII file to print on startup — see Section 6a. Blank disables it. |
-| `send_proxy_protocol` | `no` | Sends a PROXY protocol v1 header to the backend — see Section 18. Only enable if your backend specifically supports it. |
+| `send_proxy_protocol` | `no` | Sends a PROXY protocol v1 header to the backend — see Section 18. Only enable if your backend specifically supports it. Per-listener as of 2.3, with no inheritance between sections — see Section 19. |
 | `max_connections` | `50` | Global cap on total simultaneous connections across all IPs combined — see Section 10a. Must be 1 or greater. |
 
 ## 14. Platform Notes
@@ -305,6 +306,12 @@ Thanks also to [Digital Man](https://www.synchro.net/) of the Synchronet project
 
 Items 1–4 above were identified through an independent code review of the v2.1 source; thank you to that reviewer as well.
 
+### v2.3
+
+- Added: multi-listener support -- one BotGate process can now front more than one app (a second BBS node, a different door, a plain telnet service) on different ports, each with its own `backend_host`/`backend_port`, `send_proxy_protocol`, and optionally its own `prompt_file`. See Section 19. `[proxy]` continues to define listener #1 exactly as before, so every existing single-listener config works completely unchanged after upgrading -- multi-listener is purely additive, via extra `[Listener2]`-style sections. Most other settings (timeout, `ip_cap`, rate limiting, blocklists, logging, `max_connections`) remain shared across all listeners: a bot hitting two different listeners from the same IP is still caught by the same checks, not given a fresh allowance per port. `send_proxy_protocol` is the one exception -- it's per-listener with no inheritance from `[proxy]` in either direction, since silently carrying it onto a backend that doesn't expect it breaks that connection outright rather than being harmless.
+- Added: log lines are now tagged with the listener's port (e.g. `[23230]`) so a single shared log file stays readable once more than one listener is in play.
+- Added: startup fails fast with a clear config error if two listener sections are given the same `listen_port`, instead of a raw socket-bind traceback.
+
 ## 18. Passing the Real Caller IP to the Backend (Advanced)
 
 Because BotGate relays connections by opening a **brand-new** TCP connection to the backend once a caller passes the gate, the backend BBS has no inherent way to know the original caller's IP — it only sees the connection coming from wherever BotGate itself is running (`127.0.0.1`, or whatever machine BotGate is on). This matters if your backend does its own IP-based filtering, banning, or logging, since all of that would otherwise only ever see BotGate's address, not the real caller's.
@@ -334,3 +341,76 @@ In practice this is a smaller gap than it might first appear: BotGate's own prot
 ### Other backends
 
 If your BBS software supports PROXY protocol (check its documentation for "PROXY protocol," "HAProxy," or similar), the same `send_proxy_protocol = yes` setting should work the same way it does for Synchronet. If it doesn't, the same reasoning as the Mystic section above applies: BotGate's own protections are still fully in effect using the real caller IP, even if the backend itself only ever sees BotGate's address.
+
+## 19. Multi-Listener Support: Protecting More Than One App
+
+*(New in 2.3.)*
+
+One BotGate process can front more than one app at once -- a second BBS node, a different door program, a plain telnet service -- each on its own public port, each relaying to its own backend.
+
+### How it works
+
+`[proxy]` continues to define your first listener exactly as it always has: `listen_port`, `backend_host`, `backend_port`, and `prompt_file`. To add another app, add another section with any name you like (conventionally `[Listener2]`, `[Listener3]`, ...):
+
+```ini
+[proxy]
+listen_port = 23230
+backend_host = 192.168.1.199
+backend_port = 23230
+prompt_file = prelog_spitfire.asc
+
+[Listener2]
+listen_port = 2323
+backend_host = 192.168.1.199
+backend_port = 2424
+prompt_file = prelog_generic.asc
+```
+
+Each listener section supports these keys:
+
+| Key | Required | Notes |
+|---|---|---|
+| `listen_port` | yes | Must be unique across every listener -- BotGate refuses to start if two sections claim the same port, with a clear error naming both sections. |
+| `backend_host` | yes | Where this listener relays to once a caller passes. |
+| `backend_port` | yes | -- |
+| `prompt_file` | no | The caller-facing gate screen for this listener. Left blank, it falls back to `[proxy]`'s own `prompt_file` -- so you only need to set it on the listeners that should look different. |
+| `send_proxy_protocol` | no | See the callout below -- this one does **not** fall back to `[proxy]`'s value. Defaults to `no` per listener. |
+
+**Most other settings are shared, not per-listener.** `timeout_seconds`, `required_hits`, `live_countdown`, `ip_cap`, `can_dir`/`geo_dir` blocklists, `dns_lookup_enabled`, rate limiting, `banner_file`, `log_file`/`log_level`, and `max_connections` all come from `[proxy]` and apply identically to every listener. This is deliberate: a bot (or a legitimate caller) hitting two different listeners from the same IP is still governed by the same `ip_cap` and rate-limit counters, not given a fresh allowance by spreading itself across ports, and `max_connections` remains a true ceiling on the process as a whole.
+
+### `send_proxy_protocol` and mixed backends
+
+`send_proxy_protocol` (Section 18) is the one setting that's per-listener with **no** inheritance from `[proxy]`, in either direction. Every other per-listener key either has a sensible required value or a harmless fallback -- but silently carrying `send_proxy_protocol = yes` onto a listener whose backend doesn't expect it isn't harmless, it breaks that connection outright (the header gets read as garbled login data). So each listener, `[proxy]` included, only ever looks at its own `send_proxy_protocol` line, defaulting to `no` if the line is missing.
+
+This matters as soon as your listeners front different kinds of backends. Say `[proxy]` fronts a Synchronet node with `HAPROXY_PROTO` enabled, and `[Listener2]` fronts a Spitfire node (or anything else that isn't PROXY-protocol-aware):
+
+```ini
+[proxy]
+listen_port = 23230
+backend_host = 192.168.1.199
+backend_port = 23230
+send_proxy_protocol = yes   ; Synchronet, HAPROXY_PROTO is on
+
+[Listener2]
+listen_port = 2323
+backend_host = 192.168.1.199
+backend_port = 2424
+send_proxy_protocol = no    ; Spitfire -- would break if this were yes
+```
+
+`[Listener2]` would default to `no` even without the explicit line -- it's written out here for clarity. The important part is that `[proxy]`'s `yes` never reaches it.
+
+### Logging
+
+With more than one listener sharing a single log file, every connection-lifecycle line is now tagged with the listener's port so you can tell them apart at a glance:
+
+```
+2026-07-17 10:02:33 [INFO] [20011] Connection from 198.51.100.4:36060 -- running gate...
+2026-07-17 10:02:34 [INFO] [20011] 198.51.100.4 passed the gate -- connecting to backend 127.0.0.1:21011
+2026-07-17 10:02:35 [INFO] [20012] Connection from 203.0.113.9:50472 -- running gate...
+2026-07-17 10:02:39 [INFO] [20012] 203.0.113.9 failed the gate -- closing, no backend connection made.
+```
+
+### Upgrading an existing install
+
+No config changes are required. If your `botgate_proxy.cfg` only has a `[proxy]` section today, it continues to work exactly as it did on 2.2 -- multi-listener is opt-in, added by introducing new sections, never by changing what `[proxy]` alone does.

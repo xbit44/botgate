@@ -6,6 +6,7 @@ Originally built to protect a Spitfire BBS node running behind a NetSerial virtu
 
 ## Features
 
+- Multi-listener support (2.3+) — protect more than one app (a second BBS node, a door, a plain telnet service) from a single BotGate process, each on its own port with its own backend and optional prompt screen
 - ESC/`*` challenge gate — configurable timeout and required hit count
 - Custom ANSI/ASCII prompt screens, with a live per-second countdown
 - Optional local startup banner for the sysop's own console — never shown when piped/logged/under a service manager

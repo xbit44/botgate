@@ -23,9 +23,12 @@
    ```
    You should see:
    ```
-   Listening on 0.0.0.0:23230, relaying to <your BBS>:<port> on pass.
+   [23230] Listening on 0.0.0.0:23230, relaying to <your BBS>:<port> on pass.
+   BotGate running with 1 listener(s). (max_connections=50)
    ```
 
 6. Test a connection from **outside your network** before calling it done.
+
+**Protecting a second app too?** (2.3+) Add a `[Listener2]` section to `botgate_proxy.cfg` with its own `listen_port`/`backend_host`/`backend_port` — no changes needed to `[proxy]` or anything else. See `botgate.md`, Section 19.
 
 Full documentation: see `botgate.md`

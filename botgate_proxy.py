@@ -166,6 +166,14 @@ banner_file =
 ; enabling HAPROXY_PROTO on the Synchronet side blocks ALL direct
 ; connections to its BBS ports -- every connection must come through
 ; BotGate (or another PROXY-protocol-aware front end) from that point on.
+;
+; Multi-listener (2.3+) note: unlike prompt_file, this setting does
+; NOT fall back from [proxy] to other listener sections, and does not
+; fall forward either -- each listener (including [proxy] itself) only
+; ever uses its own send_proxy_protocol line, defaulting to no if
+; omitted. If you're fronting one Synchronet node and one non-Synchronet
+; app with the same BotGate process, set this to yes only on whichever
+; listener's backend actually expects it.
 send_proxy_protocol = no
 
 ; Global cap on total simultaneous connections, across all source IPs
@@ -178,6 +186,35 @@ send_proxy_protocol = no
 ; (e.g. number of BBS nodes) -- it's a safety ceiling, not a normal
 ; operating limit.
 max_connections = 50
+
+; ---------------------------------------------------------------------
+; Multi-listener support (2.3+): to protect a SECOND app (another BBS
+; node, a different door, a plain telnet service...) on a different
+; public port with this same BotGate process, add another section
+; below named [Listener2] (then [Listener3], etc. for more). Each one
+; needs its own listen_port/backend_host/backend_port, and may
+; optionally set its own prompt_file (falls back to the [proxy]
+; prompt_file above if left blank) -- handy if the two apps warrant
+; different login art. Every OTHER setting above (timeout_seconds,
+; ip_cap, rate limiting, blocklists, logging, max_connections, etc.)
+; is shared across every listener; it is not repeated per-section --
+; a bot hitting two different listeners from the same IP is still
+; caught by the same checks, not given a fresh allowance per port.
+;
+; The one exception is send_proxy_protocol: it's per-listener with NO
+; fallback from [proxy] (see the note above that setting) -- set it
+; explicitly on whichever listener's own backend actually expects it.
+; Example: [proxy] fronting Synchronet with HAPROXY_PROTO enabled
+; (send_proxy_protocol = yes above), [Listener2] fronting something
+; that isn't PROXY-protocol-aware (send_proxy_protocol left at no):
+;
+; [Listener2]
+; listen_port = 2323
+; backend_host = 192.168.1.XXX
+; backend_port = 2424
+; prompt_file = prelog_generic.asc
+; send_proxy_protocol = no
+; ---------------------------------------------------------------------
 """
 
 TRIGGER_BYTES = (0x1B, 0x2A)  # ESC, '*'
@@ -670,13 +707,18 @@ def load_config():
             return value
         return value if os.path.isabs(value) else os.path.join(script_dir, value)
 
-    return {
-        "listen_port": p.getint("listen_port", 2323),
-        "backend_host": p.get("backend_host", "127.0.0.1"),
-        "backend_port": p.getint("backend_port", 23),
+    # Everything below is shared across every listener -- read once from
+    # [proxy], never overridden per-listener. Rate limiting, blocklists,
+    # and the global connection cap are deliberately shared: a bot
+    # hammering two different listeners from the same IP should still
+    # trip the same ip_cap/rate-limit/exempt checks, not get double the
+    # allowance by spreading itself across ports.
+    #
+    # send_proxy_protocol is deliberately NOT in here -- see
+    # build_listener() below for why it has to be per-listener instead.
+    shared = {
         "timeout_seconds": p.getfloat("timeout_seconds", 20),
         "required_hits": p.getint("required_hits", 2),
-        "prompt_file": resolve_optional_path(p.get("prompt_file", "").strip()),
         "live_countdown": p.getboolean("live_countdown", True),
         "log_file": resolve_optional_path(p.get("log_file", "botgate_proxy.log").strip()),
         "log_level": p.get("log_level", "INFO").strip().upper(),
@@ -688,9 +730,63 @@ def load_config():
         "rate_limit_window_seconds": p.getfloat("rate_limit_window_seconds", 10),
         "rate_limit_ban_minutes": p.getfloat("rate_limit_ban_minutes", 90),
         "banner_file": resolve_optional_path(p.get("banner_file", "").strip()),
-        "send_proxy_protocol": p.getboolean("send_proxy_protocol", False),
         "max_connections": p.getint("max_connections", 50),
     }
+
+    # prompt_file (the caller-facing gate screen) IS per-listener, since
+    # that's the whole point of protecting more than one app with one
+    # BotGate instance -- but [proxy]'s own value still acts as the
+    # fallback for any listener section that doesn't set its own. This
+    # inheritance is safe: the worst case of a listener silently
+    # inheriting the wrong prompt_file is cosmetic (the wrong art shows
+    # up), never a broken connection.
+    default_prompt_file = resolve_optional_path(p.get("prompt_file", "").strip())
+
+    def build_listener(section, label):
+        own_prompt = resolve_optional_path(section.get("prompt_file", "").strip())
+        return {
+            **shared,
+            "listen_port": section.getint("listen_port", 2323),
+            "backend_host": section.get("backend_host", "127.0.0.1"),
+            "backend_port": section.getint("backend_port", 23),
+            # send_proxy_protocol does NOT fall back to [proxy]'s value the
+            # way prompt_file does -- each listener defaults to "no" unless
+            # it explicitly opts in itself. Unlike prompt_file, silently
+            # inheriting "yes" onto an unrelated backend isn't cosmetic --
+            # it breaks that connection outright, since a backend that
+            # isn't expecting a PROXY protocol header just reads it as
+            # garbled login data. In a mixed setup (e.g. [proxy] fronting
+            # Synchronet with HAPROXY_PROTO enabled, [Listener2] fronting
+            # something that isn't PROXY-protocol-aware), each listener
+            # must say what it needs, on its own line, with nothing
+            # carried over by default.
+            "send_proxy_protocol": section.getboolean("send_proxy_protocol", False),
+            "prompt_file": own_prompt or default_prompt_file,
+            "listener_label": label,
+        }
+
+    # [proxy] always defines listener #1 -- this is what makes every
+    # existing single-listener config work completely unchanged after
+    # upgrading to 2.3. Any additional section (named whatever you like,
+    # e.g. [Listener2]) becomes an extra listener sharing everything in
+    # `shared` above, with its own port/backend/prompt_file.
+    listeners = [build_listener(p, "proxy")]
+    for section_name in cfg.sections():
+        if section_name == "proxy":
+            continue
+        listeners.append(build_listener(cfg[section_name], section_name))
+
+    ports_seen = {}
+    for lcfg in listeners:
+        port = lcfg["listen_port"]
+        if port in ports_seen:
+            print(f"[botgate_proxy] Config error: listen_port {port} is used by both "
+                  f"[{ports_seen[port]}] and [{lcfg['listener_label']}] -- each listener "
+                  f"needs its own port. Fix botgate_proxy.cfg and rerun.")
+            sys.exit(1)
+        ports_seen[port] = lcfg["listener_label"]
+
+    return listeners
 
 
 DEFAULT_PROMPT_TEXT = b"\r\nPress ESC or * twice within ## seconds to continue...\r\n"
@@ -962,7 +1058,7 @@ def handle_client(client_sock, addr, cfg, blocklists, rate_limiter, global_semap
     try:
         action, reason = check_access(ip, blocklists, cfg, rate_limiter)
         if action == "block_logged":
-            log.warning(f"{ip} blocked by {reason}.")
+            log.warning(f"[{cfg['listen_port']}] {ip} blocked by {reason}.")
             try:
                 client_sock.close()
             except OSError:
@@ -985,7 +1081,7 @@ def handle_client(client_sock, addr, cfg, blocklists, rate_limiter, global_semap
         exempt = (action == "exempt")
 
         if not exempt and not try_acquire_ip_slot(ip, cfg["ip_cap"]):
-            log.warning(f"{ip} rejected -- already at IP cap ({cfg['ip_cap']}), instant drop.")
+            log.warning(f"[{cfg['listen_port']}] {ip} rejected -- already at IP cap ({cfg['ip_cap']}), instant drop.")
             try:
                 client_sock.close()
             except OSError:
@@ -1002,17 +1098,17 @@ def handle_client(client_sock, addr, cfg, blocklists, rate_limiter, global_semap
 
 
 def _handle_client_inner(client_sock, addr, cfg):
-    log.info(f"Connection from {addr[0]}:{addr[1]} -- running gate...")
+    log.info(f"[{cfg['listen_port']}] Connection from {addr[0]}:{addr[1]} -- running gate...")
     send_initial_telnet_options(client_sock)
     try:
         passed, end_row = run_gate(client_sock, cfg, addr)
     except Exception as e:
-        log.error(f"Gate error for {addr[0]}: {e}")
+        log.error(f"[{cfg['listen_port']}] Gate error for {addr[0]}: {e}")
         client_sock.close()
         return
 
     if not passed:
-        log.info(f"{addr[0]} failed the gate -- closing, no backend connection made.")
+        log.info(f"[{cfg['listen_port']}] {addr[0]} failed the gate -- closing, no backend connection made.")
         try:
             # Move well below the actual bottom of the displayed prompt
             # before printing this -- otherwise it lands wherever the
@@ -1024,7 +1120,7 @@ def _handle_client_inner(client_sock, addr, cfg):
         client_sock.close()
         return
 
-    log.info(f"{addr[0]} passed the gate -- connecting to backend "
+    log.info(f"[{cfg['listen_port']}] {addr[0]} passed the gate -- connecting to backend "
              f"{cfg['backend_host']}:{cfg['backend_port']}")
     try:
         client_sock.sendall(b"\x1b[2J\x1b[H")  # clear screen for a clean handoff
@@ -1036,7 +1132,7 @@ def _handle_client_inner(client_sock, addr, cfg):
             (cfg["backend_host"], cfg["backend_port"]), timeout=10
         )
     except OSError as e:
-        log.warning(f"Could not reach backend for {addr[0]}: {e}")
+        log.warning(f"[{cfg['listen_port']}] Could not reach backend for {addr[0]}: {e}")
         try:
             client_sock.sendall(b"\r\nBBS unavailable.\r\n")
         except OSError:
@@ -1053,7 +1149,7 @@ def _handle_client_inner(client_sock, addr, cfg):
         try:
             backend_sock.sendall(build_proxy_protocol_header(addr, backend_sock))
         except OSError as e:
-            log.warning(f"Could not send PROXY protocol header for {addr[0]}: {e}")
+            log.warning(f"[{cfg['listen_port']}] Could not send PROXY protocol header for {addr[0]}: {e}")
 
     # NetSerial (and presumably similar telnet-bridge products) waits
     # to see a real telnet negotiation handshake from whatever connects
@@ -1064,7 +1160,7 @@ def _handle_client_inner(client_sock, addr, cfg):
     send_initial_telnet_options(backend_sock)
 
     relay(client_sock, backend_sock)
-    log.info(f"Connection from {addr[0]} closed.")
+    log.info(f"[{cfg['listen_port']}] Connection from {addr[0]} closed.")
 
 
 def enable_windows_ansi():
@@ -1114,70 +1210,122 @@ def print_startup_banner(cfg):
         pass
 
 
-def main():
-    cfg = load_config()
-    print_startup_banner(cfg)
-    setup_logging(cfg["log_file"], cfg["log_level"])
+def accept_loop(listener_sock, cfg, blocklists, rate_limiter, global_semaphore):
+    """Accept loop for a single listener socket -- one of these runs in
+    its own thread per configured listener (see main()). All listeners
+    share the same blocklists, rate limiter, and global connection
+    semaphore, so protections apply consistently no matter which port a
+    caller came in on. Returns (instead of raising) once listener_sock
+    is closed out from under it, which is how main() signals shutdown."""
+    while True:
+        try:
+            client_sock, addr = listener_sock.accept()
+        except OSError:
+            return
 
-    if cfg["max_connections"] < 1:
-        log.error(f"max_connections is set to {cfg['max_connections']}, which is invalid -- "
+        # Acquire the global slot HERE, before creating a thread at
+        # all -- this is what makes max_connections a true cap on
+        # thread creation itself, not just on what a thread does
+        # once it's already running. A burst of connections beyond
+        # the cap now gets rejected right in the accept loop, with
+        # no thread ever spun up for the excess. The cap is shared
+        # across every listener, not per-listener.
+        if not global_semaphore.acquire(blocking=False):
+            log.warning(f"[{cfg['listen_port']}] {addr[0]} rejected -- global connection "
+                        f"limit ({cfg['max_connections']}) reached.")
+            try:
+                client_sock.close()
+            except OSError:
+                pass
+            continue
+
+        try:
+            t = threading.Thread(
+                target=handle_client,
+                args=(client_sock, addr, cfg, blocklists, rate_limiter, global_semaphore),
+                daemon=True,
+            )
+            t.start()
+        except Exception:
+            # If thread creation itself somehow fails (e.g. the OS
+            # genuinely can't create any more threads), don't leak
+            # the permit we already reserved.
+            global_semaphore.release()
+            try:
+                client_sock.close()
+            except OSError:
+                pass
+            raise
+
+
+def main():
+    listeners = load_config()
+    # timeout/log/can_dir/rate-limit/max_connections/etc. are identical
+    # across every entry (they're shared, not per-listener -- see
+    # load_config()), so any one of them works to read the shared settings.
+    shared_cfg = listeners[0]
+
+    print_startup_banner(shared_cfg)
+    setup_logging(shared_cfg["log_file"], shared_cfg["log_level"])
+
+    if shared_cfg["max_connections"] < 1:
+        log.error(f"max_connections is set to {shared_cfg['max_connections']}, which is invalid -- "
                   f"must be 1 or greater. (0 would reject every single caller; a negative "
                   f"value would crash outright.) Fix max_connections in botgate_proxy.cfg "
                   f"and restart.")
         sys.exit(1)
 
-    blocklists = BlockLists(cfg)
-    rate_limiter = RateLimiter(cfg, cfg["can_dir"])
-    global_semaphore = threading.BoundedSemaphore(cfg["max_connections"])
-    log.info(f"Listening on 0.0.0.0:{cfg['listen_port']}, "
-             f"relaying to {cfg['backend_host']}:{cfg['backend_port']} on pass. "
-             f"(max_connections={cfg['max_connections']})")
+    blocklists = BlockLists(shared_cfg)
+    rate_limiter = RateLimiter(shared_cfg, shared_cfg["can_dir"])
+    global_semaphore = threading.BoundedSemaphore(shared_cfg["max_connections"])
 
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("0.0.0.0", cfg["listen_port"]))
-    listener.listen(8)
-
+    sockets = []
+    threads = []
     try:
-        while True:
-            client_sock, addr = listener.accept()
-
-            # Acquire the global slot HERE, before creating a thread at
-            # all -- this is what makes max_connections a true cap on
-            # thread creation itself, not just on what a thread does
-            # once it's already running. A burst of connections beyond
-            # the cap now gets rejected right in the accept loop, with
-            # no thread ever spun up for the excess.
-            if not global_semaphore.acquire(blocking=False):
-                log.warning(f"{addr[0]} rejected -- global connection limit "
-                            f"({cfg['max_connections']}) reached.")
-                try:
-                    client_sock.close()
-                except OSError:
-                    pass
-                continue
-
+        for lcfg in listeners:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                t = threading.Thread(
-                    target=handle_client,
-                    args=(client_sock, addr, cfg, blocklists, rate_limiter, global_semaphore),
-                    daemon=True,
-                )
-                t.start()
-            except Exception:
-                # If thread creation itself somehow fails (e.g. the OS
-                # genuinely can't create any more threads), don't leak
-                # the permit we already reserved.
-                global_semaphore.release()
-                try:
-                    client_sock.close()
-                except OSError:
-                    pass
-                raise
+                sock.bind(("0.0.0.0", lcfg["listen_port"]))
+            except OSError as e:
+                log.error(f"[{lcfg['listener_label']}] Could not bind port "
+                          f"{lcfg['listen_port']}: {e}")
+                sys.exit(1)
+            sock.listen(8)
+            sockets.append(sock)
+
+            prompt_note = f", prompt {os.path.basename(lcfg['prompt_file'])}" if lcfg["prompt_file"] else ""
+            log.info(f"[{lcfg['listen_port']}] Listening on 0.0.0.0:{lcfg['listen_port']}, "
+                     f"relaying to {lcfg['backend_host']}:{lcfg['backend_port']} on pass"
+                     f"{prompt_note}.")
+
+            t = threading.Thread(
+                target=accept_loop,
+                args=(sock, lcfg, blocklists, rate_limiter, global_semaphore),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+
+        log.info(f"BotGate running with {len(listeners)} listener(s). "
+                 f"(max_connections={shared_cfg['max_connections']})")
+
+        # The real work happens in the accept_loop threads above; the
+        # main thread just waits here for Ctrl+C. KeyboardInterrupt is
+        # delivered to the main thread only, so it lands here, we fall
+        # through to the finally below, and closing every listener
+        # socket unblocks each accept_loop's accept() call with an
+        # OSError so each thread exits cleanly.
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         log.info("Shutting down.")
     finally:
-        listener.close()
+        for sock in sockets:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
