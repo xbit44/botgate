@@ -1,5 +1,11 @@
 # BotGate
 
+<p align="center">
+  <img src="botgate-screenshot.jpg"
+       alt="BotGate human verification screen"
+       width="900">
+</p>
+
 A TCP-level bot gate for BBS systems. BotGate sits in front of your BBS's real telnet port and requires each caller to press ESC and/or `*` twice within a configurable timeout before your actual BBS software ever sees the connection. Callers who don't respond — or who are obviously automated rather than human — are disconnected without ever reaching the BBS.
 
 Originally built to protect a Spitfire BBS node running behind a NetSerial virtual-modem bridge, but it works with any BBS reachable over telnet (Synchronet, Mystic, WWIV, Spitfire, or anything else), since it operates purely at the TCP/telnet level with no dependency on, or awareness of, what's actually running behind it.
