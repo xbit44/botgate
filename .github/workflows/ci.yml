@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke-${{ matrix.os }}-py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.x']
+        include:
+          # Oldest interpreter available per OS, to check the 3.6+ floor
+          # quick-install.md claims. actions/python-versions ships 3.6
+          # for Windows (3.6.8) and for macOS x64, but on Linux only up
+          # to ubuntu-20.04, which is no longer a hosted runner -- hence
+          # 3.9 there and 3.6 on Windows.
+          - os: ubuntu-latest
+            python-version: '3.9'
+          - os: windows-latest
+            python-version: '3.6'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Syntax check
+        run: python -m py_compile botgate_proxy.py tests/smoke_test.py
+
+      - name: Default config is written when none exists
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/defaultcfg"
+          cp botgate_proxy.py "${RUNNER_TEMP}/defaultcfg/"
+          cd "${RUNNER_TEMP}/defaultcfg"
+          if python botgate_proxy.py; then
+            echo "expected a non-zero exit when no config exists"
+            exit 1
+          fi
+          test -s botgate_proxy.cfg
+
+      - name: Smoke test
+        run: python tests/smoke_test.py
