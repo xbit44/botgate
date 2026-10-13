@@ -1,4 +1,4 @@
-# BotGate v2.4.1 checks
+# BotGate v2.4.2 checks
 
 From the BotGate source directory:
 
@@ -23,6 +23,15 @@ unavailability, and per-IP/global connection caps.
 Countdown-color checks cover inherited ANSI formatting, partial/full resets,
 background and bright colors, indexed/RGB colors, unchanged initial art and
 coordinates, static/uncolored prompts, and actual successive socket updates.
+
+Geo checks cover a mixed IPv4/IPv6 file: IPv6 ranges are skipped with a warning,
+valid IPv4 ranges still block, and addresses outside those ranges do not match.
+
+The v2.4.2 candidate passed all 44 tests on Windows 11 / Python 3.12.14. A real
+disposable process also started with the mixed-geo sample without an overflow.
+The owner passed live production testing on unix-bit: one IPv6 warning, two
+IPv4 ranges loaded from the sample, both listeners running, and a feed refresh.
+PR #3's GitHub checks passed on Linux, Windows, and macOS/Python 3.12.
 
 The v2.4.1 candidate passed all 43 tests on Windows 11 / Python 3.12.14. The
 owner also passed live production testing of the countdown-color fix on unix-bit.

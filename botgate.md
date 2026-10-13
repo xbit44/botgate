@@ -1,7 +1,7 @@
 # BotGate
 
 **A TCP-Level Bot Gate for BBS Systems**
-Version 2.4.1 — User Guide & Configuration Reference
+Version 2.4.2 — User Guide & Configuration Reference
 
 BotGate is a standalone Python 3 program that stands in front of a BBS's real telnet port and requires each caller to prove they can follow a simple interactive instruction — pressing ESC or `*` twice — before the actual BBS software ever sees the connection. Callers who don't respond (or who are obviously automated, not human) are disconnected without ever reaching the BBS.
 
@@ -334,6 +334,7 @@ BotGate is pure Python 3 standard library — no code changes are needed to run 
 - **A test from your own LAN behaves inconsistently or times out, but external callers work fine** — this is very likely NAT hairpinning on your router (looping traffic back out and in through your own public IP), not a BotGate issue. Test from a genuinely external network (cellular data, a friend's connection, or a remote shell) instead.
 - **ANSI art looks garbled or "staircases" diagonally** — the `prompt_file` was saved through a plain text editor rather than a real DOS-art tool. Re-author it in Moebius or similar (see Section 6).
 - **A geo blocklist file loads with 0 ranges** — confirm "Apache 2.0 - 2.3 .htaccess deny" was selected as the output format when downloading (see Section 8).
+- **Log reports skipped IPv6 geo ranges** — choose IPv4 lists when downloading. IPv6 entries are ignored with one warning per affected file; valid IPv4 entries still load. This prevents a startup overflow and does not add IPv6 support.
 - **The live countdown shows garbled/overlapping text on web-based telnet clients (e.g. fTelnet), but looks fine in SyncTERM/NetRunner/etc.** — this is a client-side ANSI rendering limitation, not a BotGate issue; the gate still functions correctly even when the countdown display glitches. Set `live_countdown = no` for a static (non-updating) display that renders correctly everywhere (see Section 6).
 
 ## 16. Credits
@@ -346,6 +347,15 @@ The managed reputation list comes from [borestad/blocklist-abuseipdb](https://gi
 Its feed credits [AbuseIPDB](https://www.abuseipdb.com/) and [IPinfo](https://ipinfo.io/).
 
 ## 17. Version History
+
+### v2.4.2
+
+- Fixed startup `OverflowError` when geo files contain IPv6 ranges. BotGate
+  skips those ranges and logs one warning per affected file, while retaining
+  valid IPv4 ranges. IPv4 listening and filtering are unchanged.
+- Added a mixed IPv4/IPv6 geo regression test, bringing the suite to 44 tests.
+  The owner passed live production testing on unix-bit. No config changes.
+- Contributed by Snowblind350 in [PR #3](https://github.com/xbit44/botgate/pull/3).
 
 ### v2.4.1
 

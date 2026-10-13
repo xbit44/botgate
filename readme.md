@@ -1,4 +1,4 @@
-# BotGate v2.4.1
+# BotGate v2.4.2
 
 <p align="center">
   <img src="botgate-screenshot.jpg"
@@ -27,20 +27,28 @@ Originally built to protect a Spitfire BBS node running behind a NetSerial virtu
 
 ## Getting Started
 
-**Fixed in v2.4.1:** live countdown updates now retain the
-ANSI color and attributes active at `##`, including formatting inherited from
-an earlier line. The prompt's ending formatting is restored after each update.
-No new configuration setting is required. See [issue #2](https://github.com/xbit44/botgate/issues/2).
+**Fixed in v2.4.2:** IPv6 entries in a geo blocklist no longer crash BotGate
+at startup. They are skipped with one warning per affected file, while valid
+IPv4 ranges remain active. BotGate continues to listen on IPv4 only.
+No configuration changes are required. See [PR #3](https://github.com/xbit44/botgate/pull/3).
 
 See **[quick-install.md](quick-install.md)** for the bare-minimum steps to get running, and **[botgate.md](botgate.md)** for the full user guide — every configuration option, feature walkthroughs, and troubleshooting.
 
-### What's new in v2.4.1
+### What's new in v2.4.2
+
+- Fixed an `OverflowError` at startup when a geo file contains IPv6 ranges.
+- Logs the number of skipped IPv6 ranges and the affected file once at startup.
+- Added a regression test for mixed IPv4/IPv6 geo files; the suite contains
+  44 tests. The owner also passed live production testing on unix-bit.
+
+### Fixed in v2.4.1
 
 - Fixed custom ANSI countdown numbers reverting to the prompt's ending color
   during updates. Foreground/background colors and attributes active at `##`
   are honored, including formatting carried over from an earlier line.
 - Added regression checks for colored countdowns, resets, plain/static prompts,
-  and successive updates over real sockets. The suite now contains 43 tests.
+  and successive updates over real sockets. That release brought the suite to
+  43 tests. See [issue #2](https://github.com/xbit44/botgate/issues/2).
 
 ### Added in v2.4
 
@@ -66,10 +74,12 @@ over HTTPS. It does not call the AbuseIPDB API or need an API key.
 manually; use the normal local block/exempt files. See [Section 7a](botgate.md#7a-managed-abuseipdb-feed)
 for details.
 
-**Upgrading:** replace `botgate_proxy.py` and add the commented setting from the
-sample config under your existing `[proxy]` section. Keep your production
-settings, prompts, and local blocklists. Enabled older configs without the new
-setting use the 12-hour default; set `abuseipdb update = 0` to disable the feed.
+**Upgrading from v2.4 or v2.4.1:** stop BotGate, back up the working script,
+replace only `botgate_proxy.py`, then restart. Keep your production settings,
+prompts, and blocklists; no config changes are required for v2.4.2.
+If upgrading from before v2.4, review the commented managed-feed setting in the
+sample config under `[proxy]`. Older configs default to 12 hours;
+`abuseipdb update = 0` disables the feed.
 
 ## Credits
 
@@ -80,6 +90,9 @@ Thanks also to [Digital Man](https://www.synchro.net/) of the Synchronet project
 The managed reputation feed is maintained by [borestad/blocklist-abuseipdb](https://github.com/borestad/blocklist-abuseipdb)
 using AbuseIPDB-derived data. Its upstream comments credit [AbuseIPDB](https://www.abuseipdb.com/)
 and [IPinfo](https://ipinfo.io/).
+
+Thanks to [Snowblind350](https://github.com/Snowblind350) for the IPv6 geo-file
+startup fix and its regression test in [PR #3](https://github.com/xbit44/botgate/pull/3).
 
 ## License
 

@@ -1,10 +1,10 @@
-BotGate v2.4.1 - TCP gate for
+BotGate v2.4.2 - TCP gate for
 any telnet BBS. ESC/* challenge
 before reaching your real BBS.
-Managed AbuseIPDB IPv4 feed,
-multi-listener shared protection.
+Managed AbuseIPDB IPv4 feed.
+Multi-listener, .can, geo-block.
+IPv6 geo entries safely skipped.
 ANSI countdown colors preserved.
-.can blocklists, geo-block,
-reverse-DNS, auto rate-limit bans.
+Reverse-DNS, auto rate-limit bans.
 Pure Python3, zero deps.
-Linux/Win/Mac. Built for Spitfire.
+Linux/Win/Mac.

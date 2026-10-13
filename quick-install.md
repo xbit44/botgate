@@ -1,4 +1,4 @@
-# BotGate v2.4.1 — Quick Install
+# BotGate v2.4.2 — Quick Install
 
 0. Need Python first? Requires **3.6+**.
    - Windows: [python.org/downloads](https://www.python.org/downloads/) — check "Add python.exe to PATH" during install.
@@ -40,10 +40,14 @@
 Full documentation: see `botgate.md`
 
 **Upgrading an existing installation?** Keep your production configuration,
-prompt art, and local blocklists. Stop BotGate, replace the script with v2.4.1,
-then restart. The countdown-color fix uses your prompt's existing ANSI colors;
-no new setting or prompt edit is required. Keep `live_countdown = yes` for live
-updates (`no` continues to show a static starting number).
+prompt art, and local blocklists. Stop BotGate, back up the working script,
+replace it with v2.4.2, then restart. No config edit is required when upgrading
+from v2.4 or v2.4.1. IPv6 entries in geo files are now skipped with a warning,
+preserving valid IPv4 ranges instead of crashing at startup. Choose IPv4 lists;
+this update does not add IPv6 listening or filtering.
+
+The countdown-color fix from v2.4.1 remains included. Keep `live_countdown = yes`
+for live updates (`no` continues to show a static starting number).
 
 If upgrading from before v2.4, add the commented `abuseipdb update` setting from
 the sample config under your existing `[proxy]` section; the default when omitted
